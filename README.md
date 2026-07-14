@@ -74,16 +74,31 @@ re-auth on every restart; refresh happens automatically.
 6. **Save the set** — once you're happy (any time, mid-set or after), save the played +
    remaining order as a new Spotify playlist.
 
+### Cut Mode
+
+Toggle **Cut Mode** next to MC mode before designing the set, and Claude also chooses a
+`start_ms`/`end_ms` for every track — skipping long intros, dropping in near the hook, and
+exiting right after the best chorus instead of letting the track ring out. While the set
+plays, the app polls Spotify's playback position every ~700ms and hard-cuts to the next
+track's `start_ms` the instant the current one crosses its planned `end_ms` — no
+front-to-back playback. The setlist shows each track's planned segment (e.g. `1:05 → 3:40`)
+and Now Playing shows a countdown to the next cut. Live steering and re-plans keep working
+in Cut Mode: every re-plan (a vibe steer, a pin/ban, or a skip) regenerates fresh cut points
+for the tracks it touches. Since Spotify can't crossfade for us, turn on Spotify's own
+crossfade (Settings → Playback → Crossfade, 8–12s) so the cuts blend instead of hitting
+abruptly — the app reminds you once the set starts.
+
 ## Known limitations
 
 - **No BPM/key data from Spotify.** The `/v1/audio-features` and `/v1/audio-analysis`
   endpoints were deprecated by Spotify on Nov 27, 2024 and return 403 for all new apps.
-  Every `estimated_bpm` and `energy_1_to_10` value in this app is Claude's best estimate
-  from its general knowledge of the track/artist — treat them as musically sensible
-  guidance, not measured data.
-- **No true crossfading.** The Spotify Web API controls track order, queue, and skips —
-  not audio. Turn on Spotify's own crossfade (Settings → Playback) for smoother blends;
-  the app reminds you of this once the set starts.
+  Every `estimated_bpm`, `energy_1_to_10`, and Cut Mode `start_ms`/`end_ms` value in this
+  app is Claude's best estimate from its general knowledge of the track/artist — treat them
+  as musically sensible guidance, not measured data.
+- **No true crossfading or beatmatching.** The Spotify Web API controls track order, queue,
+  seeking, and skips — not audio. Cut Mode is a hard cut (a `play` call with a `position_ms`
+  offset), not a blend; Spotify's own crossfade (Settings → Playback) is the closest this
+  can get to smoothing it, and the app reminds you of this once the set starts.
 - **Playlist track visibility.** Since Spotify's February 2026 Web API changes, playlist
   contents are only returned for playlists you own or collaborate on — for other people's
   public playlists you'll get metadata but no track list. Save a copy to your own library

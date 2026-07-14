@@ -9,11 +9,17 @@ export default function BriefForm({
 }: {
   trackCount: number;
   designing: boolean;
-  onDesign: (brief: string, targetLengthMinutes: number | undefined, mcMode: boolean) => void;
+  onDesign: (
+    brief: string,
+    targetLengthMinutes: number | undefined,
+    mcMode: boolean,
+    cutMode: boolean
+  ) => void;
 }) {
   const [brief, setBrief] = useState("");
   const [lengthMinutes, setLengthMinutes] = useState<string>("");
   const [mcMode, setMcMode] = useState(false);
+  const [cutMode, setCutMode] = useState(false);
 
   return (
     <div className="mx-auto w-full max-w-2xl space-y-4">
@@ -45,10 +51,20 @@ export default function BriefForm({
           <input type="checkbox" checked={mcMode} onChange={(e) => setMcMode(e.target.checked)} />
           MC mode (radio-DJ intros)
         </label>
+        <label className="flex items-center gap-2 text-sm text-booth-dim" title="Hard-cuts each track down to its best segment instead of playing it front to back">
+          <input type="checkbox" checked={cutMode} onChange={(e) => setCutMode(e.target.checked)} />
+          Cut Mode (skip intros/outros, hit the drops)
+        </label>
       </div>
+      {cutMode && (
+        <p className="rounded-lg border border-booth-accent2/30 bg-booth-accent2/10 px-3 py-2 text-xs text-booth-accent2">
+          Cut Mode chooses an in/out point for every track and hard-cuts between them — enable Spotify&rsquo;s
+          crossfade (Settings → Playback → Crossfade, 8–12s) once the set starts so the cuts blend.
+        </p>
+      )}
       <button
         disabled={designing}
-        onClick={() => onDesign(brief, lengthMinutes ? Number(lengthMinutes) : undefined, mcMode)}
+        onClick={() => onDesign(brief, lengthMinutes ? Number(lengthMinutes) : undefined, mcMode, cutMode)}
         className="w-full rounded-lg bg-booth-accent py-2.5 font-semibold text-black transition hover:brightness-110 disabled:opacity-50"
       >
         {designing ? "Designing the set…" : "Design the set"}

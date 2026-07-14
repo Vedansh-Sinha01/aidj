@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
   try {
-    const { instruction, pool, remainingSetlist, playedHistory, bannedUris } = await req.json();
+    const { instruction, pool, remainingSetlist, playedHistory, bannedUris, cutMode } = await req.json();
     if (!instruction || !Array.isArray(pool)) {
       return NextResponse.json({ error: "instruction and pool[] are required" }, { status: 400 });
     }
@@ -15,6 +15,7 @@ export async function POST(req: NextRequest) {
       remainingSetlist: remainingSetlist ?? [],
       playedHistory: playedHistory ?? [],
       bannedUris: bannedUris ?? [],
+      cutMode: !!cutMode,
     });
     return NextResponse.json({ result });
   } catch (e) {

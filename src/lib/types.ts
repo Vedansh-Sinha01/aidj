@@ -37,6 +37,9 @@ export interface SetlistEntry {
   transition_note: string;
   locked?: boolean;
   mcLine?: string;
+  /** Cut Mode only: ms offset to enter/exit the track. Absent when Cut Mode is off. */
+  start_ms?: number;
+  end_ms?: number;
 }
 
 export interface BenchedTrack {

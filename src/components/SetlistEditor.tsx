@@ -4,6 +4,7 @@ import { DndContext, closestCenter, PointerSensor, useSensor, useSensors, DragEn
 import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import type { SetlistEntry } from "@/lib/types";
+import { formatSegment } from "@/lib/format";
 
 const PHASE_BADGE: Record<string, string> = {
   warmup: "bg-blue-500/20 text-blue-300",
@@ -63,6 +64,11 @@ function Row({
           <span className="text-[11px] text-booth-dim">
             {entry.estimated_bpm} bpm · energy {entry.energy_1_to_10}/10
           </span>
+          {formatSegment(entry.start_ms, entry.end_ms) && (
+            <span className="rounded bg-booth-warn/15 px-1.5 py-0.5 text-[10px] font-medium text-booth-warn">
+              ✂ {formatSegment(entry.start_ms, entry.end_ms)}
+            </span>
+          )}
         </div>
         {entry.transition_note && (
           <p className="mt-1 text-xs italic text-booth-dim">↳ {entry.transition_note}</p>

@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
   try {
-    const { brief, tracks, targetLengthMinutes, mcMode } = await req.json();
+    const { brief, tracks, targetLengthMinutes, mcMode, cutMode } = await req.json();
     if (!Array.isArray(tracks) || tracks.length === 0) {
       return NextResponse.json({ error: "tracks[] is required" }, { status: 400 });
     }
@@ -14,6 +14,7 @@ export async function POST(req: NextRequest) {
       tracks,
       targetLengthMinutes: targetLengthMinutes || undefined,
       mcMode: !!mcMode,
+      cutMode: !!cutMode,
     });
     return NextResponse.json({ plan });
   } catch (e) {

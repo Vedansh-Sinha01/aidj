@@ -164,12 +164,21 @@ export async function getPlaybackState(): Promise<any | null> {
   return res.json();
 }
 
-export async function startPlayback(deviceId: string, uris: string[]): Promise<void> {
+export async function startPlayback(deviceId: string, uris: string[], positionMs?: number): Promise<void> {
+  const body: Record<string, unknown> = { uris };
+  if (typeof positionMs === "number") body.position_ms = Math.max(0, Math.floor(positionMs));
   await spotifyFetch(`/me/player/play?device_id=${encodeURIComponent(deviceId)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ uris }),
+    body: JSON.stringify(body),
   });
+}
+
+/** Seeks within the CURRENTLY PLAYING track — does not change which track is loaded. */
+export async function seekToPosition(positionMs: number, deviceId?: string): Promise<void> {
+  const qs = new URLSearchParams({ position_ms: String(Math.max(0, Math.floor(positionMs))) });
+  if (deviceId) qs.set("device_id", deviceId);
+  await spotifyFetch(`/me/player/seek?${qs.toString()}`, { method: "PUT" });
 }
 
 export async function transferPlayback(deviceId: string, play = true): Promise<void> {

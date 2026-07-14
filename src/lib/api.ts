@@ -27,22 +27,42 @@ export const api = {
   tracks: (playlistId: string) => j<{ tracks: any[] }>(`/api/spotify/tracks?playlistId=${playlistId}`),
   devices: () => j<{ devices: any[] }>("/api/spotify/devices"),
   playerState: () => j<{ state: any | null }>("/api/spotify/player"),
-  startSet: (deviceId: string, uris: string[]) =>
-    j<{ ok: boolean }>("/api/spotify/player", { method: "POST", body: JSON.stringify({ deviceId, uris }) }),
+  startSet: (deviceId: string, uris: string[], positionMs?: number) =>
+    j<{ ok: boolean }>("/api/spotify/player", {
+      method: "POST",
+      body: JSON.stringify({ deviceId, uris, positionMs }),
+    }),
   play: () => j<{ ok: boolean }>("/api/spotify/player/play", { method: "POST" }),
   pause: () => j<{ ok: boolean }>("/api/spotify/player/pause", { method: "POST" }),
   next: () => j<{ ok: boolean }>("/api/spotify/player/next", { method: "POST" }),
   queueTrack: (uri: string) =>
     j<{ ok: boolean }>("/api/spotify/player/queue", { method: "POST", body: JSON.stringify({ uri }) }),
+  /** Cut Mode: immediately switch playback to `uri` at `positionMs` (a hard cut). */
+  cutTo: (deviceId: string, uri: string, positionMs: number) =>
+    j<{ ok: boolean }>("/api/spotify/player/cut", {
+      method: "POST",
+      body: JSON.stringify({ deviceId, uri, positionMs }),
+    }),
+  seek: (positionMs: number, deviceId?: string) =>
+    j<{ ok: boolean }>("/api/spotify/player/seek", {
+      method: "POST",
+      body: JSON.stringify({ positionMs, deviceId }),
+    }),
   createPlaylist: (name: string, description: string, uris: string[]) =>
     j<{ id: string; url: string }>("/api/spotify/playlist/create", {
       method: "POST",
       body: JSON.stringify({ name, description, uris }),
     }),
-  plan: (brief: string, tracks: any[], targetLengthMinutes: number | undefined, mcMode: boolean) =>
+  plan: (
+    brief: string,
+    tracks: any[],
+    targetLengthMinutes: number | undefined,
+    mcMode: boolean,
+    cutMode: boolean
+  ) =>
     j<{ plan: any }>("/api/claude/plan", {
       method: "POST",
-      body: JSON.stringify({ brief, tracks, targetLengthMinutes, mcMode }),
+      body: JSON.stringify({ brief, tracks, targetLengthMinutes, mcMode, cutMode }),
     }),
   steer: (payload: {
     instruction: string;
@@ -50,5 +70,6 @@ export const api = {
     remainingSetlist: any[];
     playedHistory: any[];
     bannedUris: string[];
+    cutMode: boolean;
   }) => j<{ result: any }>("/api/claude/steer", { method: "POST", body: JSON.stringify(payload) }),
 };

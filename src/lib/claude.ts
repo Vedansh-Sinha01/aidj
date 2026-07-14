@@ -28,7 +28,7 @@ function serializeTracks(tracks: Track[]): string {
 
 const phaseEnum = ["warmup", "build", "peak", "cooldown"];
 
-function setlistEntrySchema(withMc: boolean) {
+function setlistEntrySchema(withMc: boolean, withCut: boolean) {
   const properties: Record<string, unknown> = {
     spotify_uri: { type: "string", description: "Must exactly match a uri from the provided track pool." },
     title: { type: "string" },
@@ -57,16 +57,29 @@ function setlistEntrySchema(withMc: boolean) {
     };
     required.push("mc_line");
   }
+  if (withCut) {
+    properties.start_ms = {
+      type: "integer",
+      description:
+        "Millisecond offset into the track where playback should ENTER — skip long/slow intros, drop in near where the energy/vocal/hook starts. 0 if the track should play from the top.",
+    };
+    properties.end_ms = {
+      type: "integer",
+      description:
+        "Millisecond offset into the track where playback should EXIT — right after the best chorus/drop/hook, before the outro drags. Must be greater than start_ms and must never exceed the track's duration_ms.",
+    };
+    required.push("start_ms", "end_ms");
+  }
   return { type: "object", properties, required, additionalProperties: false };
 }
 
-function planSchema(withMc: boolean) {
+function planSchema(withMc: boolean, withCut: boolean) {
   return {
     type: "json_schema",
     schema: {
       type: "object",
       properties: {
-        setlist: { type: "array", items: setlistEntrySchema(withMc) },
+        setlist: { type: "array", items: setlistEntrySchema(withMc, withCut) },
         benched: {
           type: "array",
           items: {
@@ -97,7 +110,13 @@ Design principles:
 - estimated_bpm and energy_1_to_10 are your best estimate from general knowledge of the track/artist; they don't need to be precise, just musically sensible and internally consistent with the arc.
 - If asked for a shorter set than the full pool, choose which tracks make the cut and list the rest in "benched" with a one-line reason each. If no length is specified, use the whole pool (every track appears in either setlist or benched).
 - Never invent a track that is not in the pool. Never duplicate a track.
-- Respond only via the provided JSON schema.`;
+- Respond only via the provided JSON schema.
+
+When the schema includes start_ms and end_ms (Cut Mode), you are also choosing exactly which slice of each track plays — Spotify's API can't beatmatch or crossfade, so the illusion of a real DJ set comes entirely from cutting each track down to its best segment and hitting the next one right on time. Use your knowledge of the track's actual structure (intro length, where the beat/vocal/hook drops, chorus placement, outro length) to pick a punchy in-and-out point:
+- Skip long or slow intros — start_ms should land at or just before the point where the beat, vocal, or hook kicks in, not at 0:00 unless the track truly opens strong.
+- End right after the best chorus, hook, or drop — end_ms should cut the track before the energy drops off into an outro or breakdown, not let it ring out.
+- Aim for punchy 2-3 minute segments (roughly 120,000-180,000 ms) as the default, but vary it deliberately by the track's role and the vibe brief: an opener or a track early in a warmup phase can breathe longer (even the (near-)full track); peak-time / high-energy tracks should hit fast and get out fast (as short as ~60-90 seconds if the brief calls for a rapid-fire peak); a cooldown closer can also run long.
+- start_ms must be >= 0 and < end_ms. end_ms must be <= the track's duration_ms and must leave at least 20 seconds of playable segment. When unsure, prefer a slightly longer, safer segment over an aggressive cut that might land mid-phrase.`;
 
 async function requestOnce(system: string, user: string, schema: unknown): Promise<string> {
   const res = await client().messages.create({
@@ -137,16 +156,35 @@ async function callJson<T>(system: string, user: string, schema: unknown): Promi
   }
 }
 
+// Any segment shorter than this is considered a degenerate cut and falls back to the full track.
+const MIN_SEGMENT_MS = 15000;
+
+/** Clamps Claude's chosen cut points to the track's real duration; falls back to the full track on nonsense. */
+function clampCutPoints(entry: SetlistEntry, durationMs: number): SetlistEntry {
+  const hasStart = typeof entry.start_ms === "number" && Number.isFinite(entry.start_ms);
+  const hasEnd = typeof entry.end_ms === "number" && Number.isFinite(entry.end_ms);
+  if (!hasStart && !hasEnd) return entry;
+  let start = Math.max(0, Math.min(entry.start_ms ?? 0, durationMs));
+  let end = Math.max(0, Math.min(entry.end_ms ?? durationMs, durationMs || entry.end_ms || 0));
+  if (durationMs <= 0 || end - start < MIN_SEGMENT_MS) {
+    start = 0;
+    end = durationMs || end || 0;
+  }
+  return { ...entry, start_ms: start, end_ms: end };
+}
+
 function validateAndClean(plan: SetPlan, pool: Track[]): SetPlan {
   const byUri = new Map(pool.map((t) => [t.uri, t]));
   const seen = new Set<string>();
   const setlist: SetlistEntry[] = [];
   for (const entry of plan.setlist ?? []) {
-    if (!byUri.has(entry.spotify_uri)) continue; // hallucinated / invalid URI — drop it
+    const track = byUri.get(entry.spotify_uri);
+    if (!track) continue; // hallucinated / invalid URI — drop it
     if (seen.has(entry.spotify_uri)) continue; // dedupe
     seen.add(entry.spotify_uri);
     const mcLine = (entry as any).mc_line as string | undefined;
-    setlist.push(mcLine ? { ...entry, mcLine } : entry);
+    const withMc = mcLine ? { ...entry, mcLine } : entry;
+    setlist.push(clampCutPoints(withMc, track.durationMs));
   }
   const benched: BenchedTrack[] = (plan.benched ?? []).filter(
     (b) => byUri.has(b.spotify_uri) && !seen.has(b.spotify_uri)
@@ -159,8 +197,9 @@ export async function generateSetPlan(opts: {
   tracks: Track[];
   targetLengthMinutes?: number;
   mcMode: boolean;
+  cutMode: boolean;
 }): Promise<SetPlan> {
-  const { brief, tracks, targetLengthMinutes, mcMode } = opts;
+  const { brief, tracks, targetLengthMinutes, mcMode, cutMode } = opts;
   const lengthNote = targetLengthMinutes
     ? `Target set length: about ${targetLengthMinutes} minutes. Select the subset of tracks that best fits this brief and length; bench the rest.`
     : `No target length given — use the entire pool of ${tracks.length} tracks, in a designed order.`;
@@ -168,90 +207,97 @@ export async function generateSetPlan(opts: {
 
 ${lengthNote}
 ${mcMode ? "MC mode is ON — include a short one-line radio-DJ intro (mc_line) for every track." : ""}
+${
+  cutMode
+    ? "Cut Mode is ON — for every track also choose start_ms and end_ms as described above. The app will hard-cut from each track's end_ms straight into the next track's start_ms, so choose points that make that cut land well."
+    : ""
+}
 
 Track pool (tab-separated, one per line):
 ${serializeTracks(tracks)}`;
 
-  const plan = await callJson<SetPlan>(PLAN_SYSTEM_PROMPT, user, planSchema(mcMode));
+  const plan = await callJson<SetPlan>(PLAN_SYSTEM_PROMPT, user, planSchema(mcMode, cutMode));
   return validateAndClean(plan, tracks);
 }
 
 const STEER_SYSTEM_PROMPT = `You are Set Architect's live steering brain. The DJ set is already playing. You receive: the full track pool, the remaining (not-yet-played) setlist, the played history, any locked/banned tracks, and a message from the human DJ. Classify the message and respond via the JSON schema:
 
 - "action": the message is a literal, specific command — e.g. "play X next", "queue the Daft Punk one after this", "save X for the finale", "don't play Y tonight", or a skip. Resolve the referenced track by fuzzy-matching against the track pool (titles, artists, loose descriptions like "the Queen song" or "that one from the Barbie soundtrack"). Obey commands literally — no creative reinterpretation. action_type is one of: play_next, insert_after_current, pin_to_position, ban_track. confirmation is a short one-line human-readable summary of what you did (e.g. "Pinned 'One More Time' -> up next").
-- "replan": the message is a vibe/direction steer — e.g. "take it darker", "more 90s hip-hop", "energy up now", or a skip used as feedback. Re-plan the REMAINING part of the set (tracks already played stay played and must not reappear) using the same pool, pulling in benched tracks or benching queued ones as needed. Keep the same JSON shape as a full plan for the "replan" field (setlist = the new remaining order from now on, benched = pool tracks not in that order, summary = what changed and why). Entries in the given remaining setlist marked locked=true were pinned there by a direct human command — keep them at the exact same position in your new order; only reflow the unlocked tracks around them.
+- "replan": the message is a vibe/direction steer — e.g. "take it darker", "more 90s hip-hop", "energy up now", or a skip used as feedback. Re-plan the REMAINING part of the set (tracks already played stay played and must not reappear) using the same pool, pulling in benched tracks or benching queued ones as needed. Keep the same JSON shape as a full plan for the "replan" field (setlist = the new remaining order from now on, benched = pool tracks not in that order, summary = what changed and why). Entries in the given remaining setlist marked locked=true were pinned there by a direct human command — keep them at the exact same position in your new order; only reflow the unlocked tracks around them. If the setlist entries include start_ms/end_ms (Cut Mode is on), you must choose fresh start_ms/end_ms for every entry in your replanned order too — including locked entries, whose position doesn't change but whose cut points you should still confirm still make sense — following the same cut-point design principles as the initial set design (skip intros, exit after the hook, punchy segments that vary by role).
 - "ambiguous": the human referred to a track and 2-3 pool tracks are plausible matches — return them as ambiguous_candidates so the app can ask for confirmation. Do not guess.
 - "not_found": the human asked for a specific song/artist that is not in the pool at all — say so plainly in "message".
 
 Never reintroduce an already-played track unless the human explicitly asks for it. Never invent a spotify_uri that isn't in the pool. Only fill the ONE field matching your chosen "kind"; the rest must be null.`;
 
-const steerResponseSchema = {
-  type: "json_schema",
-  schema: {
-    type: "object",
-    properties: {
-      kind: { type: "string", enum: ["action", "replan", "ambiguous", "not_found"] },
-      action: {
-        type: ["object", "null"],
-        properties: {
-          action_type: {
-            type: "string",
-            enum: ["play_next", "insert_after_current", "pin_to_position", "ban_track"],
-          },
-          spotify_uri: { type: "string" },
-          position: { type: ["integer", "null"] },
-          confirmation: { type: "string" },
-        },
-        required: ["action_type", "spotify_uri", "position", "confirmation"],
-        additionalProperties: false,
-      },
-      replan: {
-        type: ["object", "null"],
-        properties: {
-          setlist: { type: "array", items: setlistEntrySchema(false) },
-          benched: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                spotify_uri: { type: "string" },
-                title: { type: "string" },
-                artist: { type: "string" },
-                reason: { type: "string" },
-              },
-              required: ["spotify_uri", "title", "artist", "reason"],
-              additionalProperties: false,
-            },
-          },
-          summary: { type: "string" },
-        },
-        required: ["setlist", "benched", "summary"],
-        additionalProperties: false,
-      },
-      ambiguous_candidates: {
-        type: ["array", "null"],
-        items: {
-          type: "object",
+function buildSteerResponseSchema(cutMode: boolean) {
+  return {
+    type: "json_schema",
+    schema: {
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["action", "replan", "ambiguous", "not_found"] },
+        action: {
+          type: ["object", "null"],
           properties: {
+            action_type: {
+              type: "string",
+              enum: ["play_next", "insert_after_current", "pin_to_position", "ban_track"],
+            },
             spotify_uri: { type: "string" },
-            title: { type: "string" },
-            artist: { type: "string" },
+            position: { type: ["integer", "null"] },
+            confirmation: { type: "string" },
           },
-          required: ["spotify_uri", "title", "artist"],
+          required: ["action_type", "spotify_uri", "position", "confirmation"],
           additionalProperties: false,
         },
+        replan: {
+          type: ["object", "null"],
+          properties: {
+            setlist: { type: "array", items: setlistEntrySchema(false, cutMode) },
+            benched: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  spotify_uri: { type: "string" },
+                  title: { type: "string" },
+                  artist: { type: "string" },
+                  reason: { type: "string" },
+                },
+                required: ["spotify_uri", "title", "artist", "reason"],
+                additionalProperties: false,
+              },
+            },
+            summary: { type: "string" },
+          },
+          required: ["setlist", "benched", "summary"],
+          additionalProperties: false,
+        },
+        ambiguous_candidates: {
+          type: ["array", "null"],
+          items: {
+            type: "object",
+            properties: {
+              spotify_uri: { type: "string" },
+              title: { type: "string" },
+              artist: { type: "string" },
+            },
+            required: ["spotify_uri", "title", "artist"],
+            additionalProperties: false,
+          },
+        },
+        pending_action_type: {
+          type: ["string", "null"],
+          enum: ["play_next", "insert_after_current", "pin_to_position", "ban_track", null],
+          description: "When kind is 'ambiguous', the action the human wants performed once a candidate is chosen.",
+        },
+        message: { type: ["string", "null"] },
       },
-      pending_action_type: {
-        type: ["string", "null"],
-        enum: ["play_next", "insert_after_current", "pin_to_position", "ban_track", null],
-        description: "When kind is 'ambiguous', the action the human wants performed once a candidate is chosen.",
-      },
-      message: { type: ["string", "null"] },
+      required: ["kind", "action", "replan", "ambiguous_candidates", "pending_action_type", "message"],
+      additionalProperties: false,
     },
-    required: ["kind", "action", "replan", "ambiguous_candidates", "pending_action_type", "message"],
-    additionalProperties: false,
-  },
-} as const;
+  } as const;
+}
 
 export async function generateSteerResponse(opts: {
   instruction: string;
@@ -259,23 +305,34 @@ export async function generateSteerResponse(opts: {
   remainingSetlist: SetlistEntry[];
   playedHistory: SetlistEntry[];
   bannedUris: string[];
+  cutMode: boolean;
 }): Promise<SteerAction> {
-  const { instruction, pool, remainingSetlist, playedHistory, bannedUris } = opts;
+  const { instruction, pool, remainingSetlist, playedHistory, bannedUris, cutMode } = opts;
   const user = `Human DJ instruction: "${instruction}"
 
 Track pool (tab-separated):
 ${serializeTracks(pool)}
 
 Remaining setlist (not yet played, in order):
-${remainingSetlist.map((e) => `${e.spotify_uri}\t${e.title}\t${e.artist}\t${e.phase}\tlocked=${!!e.locked}`).join("\n") || "(empty)"}
+${
+  remainingSetlist
+    .map(
+      (e) =>
+        `${e.spotify_uri}\t${e.title}\t${e.artist}\t${e.phase}\tlocked=${!!e.locked}${
+          cutMode && typeof e.start_ms === "number" ? `\tcurrent cut=${e.start_ms}-${e.end_ms}ms` : ""
+        }`
+    )
+    .join("\n") || "(empty)"
+}
 
 Played history (do not reintroduce unless explicitly asked):
 ${playedHistory.map((e) => `${e.spotify_uri}\t${e.title}\t${e.artist}`).join("\n") || "(none yet)"}
 
 Banned tracks (never play):
-${bannedUris.join(", ") || "(none)"}`;
+${bannedUris.join(", ") || "(none)"}
+${cutMode ? "\nCut Mode is ON — see the system prompt's replan instructions for start_ms/end_ms." : ""}`;
 
-  const raw = await callJson<any>(STEER_SYSTEM_PROMPT, user, steerResponseSchema);
+  const raw = await callJson<any>(STEER_SYSTEM_PROMPT, user, buildSteerResponseSchema(cutMode));
 
   if (raw.kind === "action" && raw.action) {
     const uri = raw.action.spotify_uri;
