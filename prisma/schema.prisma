@@ -1,0 +1,535 @@
+// Optizm Global — ATS + CRM data model
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  RECRUITER
+  MANAGER
+}
+
+enum ContactType {
+  HIRING_MANAGER
+  HR
+  FINANCE
+  OTHER
+}
+
+enum RoleStatus {
+  OPEN
+  FILLED
+  CLOSED
+}
+
+enum CandidateStage {
+  APPLIED
+  SCREENING
+  INTERVIEW
+  OFFER
+  HIRED
+  REJECTED
+}
+
+enum WorkArrangement {
+  REMOTE
+  ONSITE
+  HYBRID
+}
+
+enum LeadSource {
+  LINKEDIN
+  REFERRAL
+  INBOUND_INQUIRY
+  NETWORKING_EVENT
+  COLD_OUTREACH
+  OTHER
+}
+
+enum LeadStage {
+  NEW
+  CONTACTED
+  QUALIFIED
+  MEETING_SCHEDULED
+  CONVERTED
+  DISQUALIFIED
+}
+
+enum InvoiceStatus {
+  UNPAID
+  PAID
+  OVERDUE
+}
+
+enum PlacementStatus {
+  ACTIVE
+  ENDED
+  TERMINATED
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum TicketType {
+  CLIENT_SWAP_REQUEST
+  CANDIDATE_QUALITY_COMPLAINT
+  INVOICE_BILLING_DISPUTE
+  URGENT_ADHOC_REQUEST
+  CONTRACT_TERMS_QUESTION
+  CANDIDATE_CONSENT_DATA_ISSUE
+  FEEDBACK_OVERDUE
+  GUARANTEE_REPLACEMENT
+  OTHER
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  DECLINED
+}
+
+enum ActivitySource {
+  MANUAL
+  OUTLOOK
+}
+
+enum ActivityType {
+  EMAIL
+  MEETING
+  CALL
+  OTHER
+}
+
+enum NotificationType {
+  FEEDBACK_OVERDUE
+  CANDIDATE_STUCK_IN_STAGE
+  NEW_CANDIDATE_NO_ACTION
+  CLIENT_GONE_QUIET
+  INVOICE_DUE_SOON
+  INVOICE_OVERDUE
+  LEAD_GONE_STALE
+  TICKET_UNTOUCHED
+  APPROVAL_PENDING
+}
+
+// ---------------------------------------------------------------------------
+// Auth / Users
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         UserRole @default(RECRUITER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  assignedCandidates Candidate[]        @relation("AssignedRecruiter")
+  candidateNotes     CandidateNote[]
+  leadNotes          LeadNote[]
+  satisfactionNotes  SatisfactionNote[]
+  activityLogs       ActivityLog[]
+  ticketsAssigned    Ticket[]           @relation("TicketAssignee")
+  ticketsCreated     Ticket[]           @relation("TicketCreator")
+  ticketUpdates      TicketUpdate[]
+  approvalsRequested ApprovalRequest[]  @relation("ApprovalRequestedBy")
+  approvalsResolved  ApprovalRequest[]  @relation("ApprovalResolvedBy")
+  notifications      Notification[]
+  microsoftAccount   MicrosoftAccount?
+  sentEmails         SentEmail[]
+
+  @@map("users")
+}
+
+// Per-user Microsoft Graph OAuth connection (§8). Tokens are only ever used
+// server-side to call Graph on behalf of the connected user.
+model MicrosoftAccount {
+  id                 String    @id @default(cuid())
+  userId             String    @unique
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  microsoftUserId    String
+  email              String
+  // Serialized MSAL token cache (contains the refresh token internally).
+  // MSAL Node's supported pattern for confidential-client web apps is to
+  // persist the whole cache and let acquireTokenSilent() refresh as needed,
+  // rather than us managing a raw refresh token string ourselves.
+  tokenCache         String    @db.Text
+  lastEmailSyncAt    DateTime?
+  lastCalendarSyncAt DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@map("microsoft_accounts")
+}
+
+// A manually-composed email sent from inside the app via the user's
+// connected Outlook account (§8 — always human-reviewed, never automated).
+model SentEmail {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  contactId String?
+  contact   Contact? @relation(fields: [contactId], references: [id])
+  companyId String?
+  company   Company? @relation(fields: [companyId], references: [id])
+  to        String
+  subject   String
+  body      String   @db.Text
+  sentAt    DateTime @default(now())
+
+  @@map("sent_emails")
+}
+
+// ---------------------------------------------------------------------------
+// CRM: Companies, Contacts, Leads
+// ---------------------------------------------------------------------------
+
+model Company {
+  id        String   @id @default(cuid())
+  name      String
+  industry  String?
+  tags      String[] @default([])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  contacts          Contact[]
+  roles             Role[]
+  invoices          Invoice[]
+  tickets           Ticket[]
+  placements        Placement[]
+  activityLogs      ActivityLog[]
+  satisfactionNotes SatisfactionNote[]
+  sentEmails        SentEmail[]
+
+  @@index([name])
+  @@map("companies")
+}
+
+model Contact {
+  id        String       @id @default(cuid())
+  companyId String
+  company   Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name      String
+  title     String?
+  email     String?
+  phone     String?
+  type      ContactType?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  activityLogs ActivityLog[]
+  sentEmails   SentEmail[]
+
+  @@index([companyId])
+  @@index([email])
+  @@map("contacts")
+}
+
+// Satisfaction log feeding the Client Satisfaction component of the
+// Relationship Score (§4) — a quick manual rating, not a survey system.
+model SatisfactionNote {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id])
+  rating    Int // 1-5
+  note      String?  @db.Text
+  createdAt DateTime @default(now())
+
+  @@index([companyId])
+  @@map("satisfaction_notes")
+}
+
+model Lead {
+  id             String     @id @default(cuid())
+  companyName    String
+  contactName    String?
+  contactEmail   String?
+  contactPhone   String?
+  source         LeadSource
+  stage          LeadStage  @default(NEW)
+  stageChangedAt DateTime   @default(now())
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  notes LeadNote[]
+
+  @@index([stage])
+  @@map("leads")
+}
+
+model LeadNote {
+  id        String   @id @default(cuid())
+  leadId    String
+  lead      Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id])
+  body      String   @db.Text
+  createdAt DateTime @default(now())
+
+  @@index([leadId])
+  @@map("lead_notes")
+}
+
+// Logged touchpoint (email / meeting / call) tied to a company, either
+// manually entered or auto-synced from Outlook/Calendar (§8). Powers
+// "days since last contact" and several Relationship Score components.
+model ActivityLog {
+  id                  String         @id @default(cuid())
+  companyId           String
+  company             Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  contactId           String?
+  contact             Contact?       @relation(fields: [contactId], references: [id])
+  userId              String?
+  user                User?          @relation(fields: [userId], references: [id])
+  type                ActivityType
+  subject             String?
+  occurredAt          DateTime
+  source              ActivitySource @default(MANUAL)
+  direction           String? // "incoming" | "outgoing", for emails
+  responseTimeMinutes Int? // set on incoming emails once a reply is matched
+  externalId          String? // Graph message/event id, for dedup on sync
+  ticketPrompted      Boolean        @default(false) // §6 "log this as a ticket?" nudge shown/dismissed
+  createdAt           DateTime       @default(now())
+
+  @@unique([externalId])
+  @@index([companyId, occurredAt])
+  @@map("activity_logs")
+}
+
+// ---------------------------------------------------------------------------
+// ATS: Roles, Candidates, Placements
+// ---------------------------------------------------------------------------
+
+model Role {
+  id           String     @id @default(cuid())
+  companyId    String
+  company      Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  title        String
+  department   String?
+  status       RoleStatus @default(OPEN)
+  requirements String?    @db.Text // free-text requirements used by §10 matching
+  dateOpened   DateTime   @default(now())
+  dateFilled   DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  candidates Candidate[]
+  placements Placement[]
+
+  @@index([companyId])
+  @@map("roles")
+}
+
+model Candidate {
+  id     String  @id @default(cuid())
+  roleId String
+  role   Role    @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  name   String
+  email  String?
+  phone  String?
+
+  certifications  String[]         @default([])
+  locationText    String?
+  workArrangement WorkArrangement?
+
+  mostRecentCompany String?
+  mostRecentTitle   String?
+  mostRecentStart   DateTime?
+  mostRecentEnd     DateTime?
+  yearsOfExperience Float?
+
+  resumeFileName    String?
+  resumeFileUrl     String?
+  resumeParsedAt    DateTime?
+  resumeParseFailed Boolean   @default(false)
+
+  stage          CandidateStage @default(APPLIED)
+  stageChangedAt DateTime       @default(now())
+
+  assignedRecruiterId String?
+  assignedRecruiter   User?   @relation("AssignedRecruiter", fields: [assignedRecruiterId], references: [id])
+
+  lastSubmittedAt DateTime? // most recent "submitted to client" timestamp (§3, §6)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  notes            CandidateNote[]
+  approvalRequests ApprovalRequest[]
+  placement        Placement?
+  tickets          Ticket[]
+
+  @@index([roleId])
+  @@index([stage])
+  @@map("candidates")
+}
+
+model CandidateNote {
+  id          String    @id @default(cuid())
+  candidateId String
+  candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  authorId    String
+  author      User      @relation(fields: [authorId], references: [id])
+  body        String    @db.Text
+  createdAt   DateTime  @default(now())
+
+  @@index([candidateId])
+  @@map("candidate_notes")
+}
+
+// A completed hire. One-to-one with the Hired candidate (§1).
+model Placement {
+  id            String          @id @default(cuid())
+  candidateId   String          @unique
+  candidate     Candidate       @relation(fields: [candidateId], references: [id])
+  roleId        String
+  role          Role            @relation(fields: [roleId], references: [id])
+  companyId     String
+  company       Company         @relation(fields: [companyId], references: [id])
+  startDate     DateTime        @default(now())
+  guaranteeDays Int             @default(90)
+  status        PlacementStatus @default(ACTIVE)
+  endDate       DateTime?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  invoices Invoice[]
+  tickets  Ticket[]
+
+  @@index([companyId])
+  @@map("placements")
+}
+
+// ---------------------------------------------------------------------------
+// Billing
+// ---------------------------------------------------------------------------
+
+model Invoice {
+  id           String        @id @default(cuid())
+  companyId    String
+  company      Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  placementId  String
+  placement    Placement     @relation(fields: [placementId], references: [id])
+  amount       Decimal       @db.Decimal(12, 2)
+  dateInvoiced DateTime      @default(now())
+  dueDate      DateTime
+  status       InvoiceStatus @default(UNPAID)
+  paidAt       DateTime?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@index([companyId])
+  @@index([status])
+  @@map("invoices")
+}
+
+// ---------------------------------------------------------------------------
+// Tickets
+// ---------------------------------------------------------------------------
+
+model Ticket {
+  id                String         @id @default(cuid())
+  companyId         String
+  company           Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  candidateId       String?
+  candidate         Candidate?     @relation(fields: [candidateId], references: [id])
+  placementId       String?
+  placement         Placement?     @relation(fields: [placementId], references: [id])
+  subject           String
+  description       String?        @db.Text
+  type              TicketType
+  status            TicketStatus   @default(OPEN)
+  priority          TicketPriority @default(MEDIUM)
+  priorityConfirmed Boolean        @default(true) // false for auto-generated tickets until assignee confirms (§6)
+  autoGenerated     Boolean        @default(false)
+  assignedToId      String
+  assignedTo        User           @relation("TicketAssignee", fields: [assignedToId], references: [id])
+  createdById       String?
+  createdBy         User?          @relation("TicketCreator", fields: [createdById], references: [id])
+  lastActivityAt    DateTime       @default(now())
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  updates TicketUpdate[]
+
+  @@index([companyId])
+  @@index([status])
+  @@map("tickets")
+}
+
+model TicketUpdate {
+  id        String   @id @default(cuid())
+  ticketId  String
+  ticket    Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id])
+  body      String   @db.Text
+  createdAt DateTime @default(now())
+
+  @@index([ticketId])
+  @@map("ticket_updates")
+}
+
+// ---------------------------------------------------------------------------
+// Candidate submission approvals (§3)
+// ---------------------------------------------------------------------------
+
+model ApprovalRequest {
+  id            String         @id @default(cuid())
+  candidateId   String
+  candidate     Candidate      @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  requestedById String
+  requestedBy   User           @relation("ApprovalRequestedBy", fields: [requestedById], references: [id])
+  status        ApprovalStatus @default(PENDING)
+  resolvedById  String?
+  resolvedBy    User?          @relation("ApprovalResolvedBy", fields: [resolvedById], references: [id])
+  resolvedAt    DateTime?
+  createdAt     DateTime       @default(now())
+
+  @@index([status])
+  @@map("approval_requests")
+}
+
+// ---------------------------------------------------------------------------
+// Notifications (§9) — in-app badges only, no automated client-facing email
+// ---------------------------------------------------------------------------
+
+model Notification {
+  id         String           @id @default(cuid())
+  userId     String
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type       NotificationType
+  message    String
+  link       String?
+  entityType String?
+  entityId   String?
+  dedupeKey  String // stable key so re-running the checker doesn't spam duplicates
+  read       Boolean          @default(false)
+  createdAt  DateTime         @default(now())
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, read])
+  @@map("notifications")
+}
